@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Agitómetro Lumínico</title>
+<style>
+  :root {
+    --lvl: 0;            /* 0..1, lo controla JS */
+    --ink: #f5f5f5;
+    --accent: #ffd54a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #000;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: var(--ink);
+    -webkit-user-select: none; user-select: none;
+    overscroll-behavior: none;
+    touch-action: manipulation;
+  }
+
+  /* La "pantalla" que simula el brillo: de negro a blanco cálido */
+  #lamp {
+    position: fixed; inset: 0;
+    background: radial-gradient(circle at 50% 45%, #fffbe8 0%, #fff3c4 40%, #ffe07a 100%);
+    opacity: var(--lvl);
+    transition: opacity 80ms linear;
+  }
+
+  main {
+    position: relative; z-index: 1;
+    height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 20px;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+    text-align: center;
+    mix-blend-mode: difference;  /* el texto siempre se ve, sea oscuro o claro */
+  }
+
+  h1 { margin: 0; font-size: clamp(22px, 7vw, 34px); letter-spacing: -0.02em; }
+  .sub { margin: 0; opacity: .75; font-size: 15px; max-width: 32ch; line-height: 1.4; }
+
+  #pct {
+    font-size: clamp(72px, 30vw, 160px);
+    font-weight: 800; line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  #mood { font-size: 18px; font-weight: 600; min-height: 1.4em; }
+
+  .meter {
+    width: min(320px, 80vw); height: 10px; border-radius: 99px;
+    border: 2px solid currentColor; overflow: hidden;
+  }
+  .meter > i { display: block; height: 100%; width: 0; background: currentColor; }
+
+  button {
+    font: inherit; font-size: 18px; font-weight: 700;
+    color: #000; background: var(--accent);
+    border: 0; border-radius: 999px;
+    padding: 16px 28px; min-height: 52px;
+    cursor: pointer;
+    mix-blend-mode: normal;
+  }
+  button:active { transform: scale(.97); }
+  .ghost {
+    background: transparent; color: currentColor;
+    border: 2px solid currentColor; font-size: 15px; padding: 10px 18px; min-height: 44px;
+  }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  .hidden { display: none !important; }
+  .tiny { font-size: 12px; opacity: .6; max-width: 34ch; line-height: 1.4; }
+
+  #start-screen { position: fixed; inset: 0; z-index: 2; background: #000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 18px; padding: 24px 16px; text-align: center; }
+  #start-screen .emoji { font-size: 72px; }
+  #err { color: #ff8a80; font-size: 14px; max-width: 34ch; }
+</style>
+</head>
+<body>
+
+<div id="lamp"></div>
+
+<section id="start-screen">
+  <div class="emoji" aria-hidden="true">📳💡</div>
+  <h1>Agitómetro Lumínico</h1>
+  <p class="sub">El sistema más inútil del mundo: agita tu celular y la pantalla brillará más. Déjalo quieto y se apaga poco a poco.</p>
+  <button id="start">Empezar a agitar</button>
+  <p id="err" class="hidden"></p>
+  <p class="tiny">Tip: sube el brillo del sistema al máximo para mejor efecto. Por seguridad, ningún navegador deja que una web cambie el brillo real, así que aquí lo simulamos con la pantalla.</p>
+</section>
+
+<main id="app" class="hidden" aria-live="polite">
+  <div id="pct">0%</div>
+  <div class="meter"><i id="bar"></i></div>
+  <div id="mood">Modo siesta 😴</div>
+  <p class="sub" id="hint">¡Agítalo!</p>
+  <div class="row">
+    <button class="ghost" id="calm">Calmarse</button>
+    <button class="ghost hidden" id="fake">Agitar de mentira</button>
+  </div>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const root = document.documentElement;
+
+  // --- Parámetros de la tontería ---
+  const DECAY_PER_SEC = 0.18;   // cuánto brillo se pierde por segundo en reposo
+  const GAIN = 0.012;           // cuánto brillo aporta cada m/s² de agitación
+  const DEADZONE = 1.2;         // ignora temblores de mano (m/s²)
+  const MAX_JOLT = 40;          // tope por muestra
+
+  let level = 0;       // brillo actual 0..1
+  let peak = 0;        // para el mensaje "récord"
+  let lastT = performance.now();
+  let lastSample = null;
+  let gotMotion = false;
+  let wakeLock = null;
+
+  const moods = [
+    [0.00, 'Modo siesta 😴'],
+    [0.10, 'Velita de cumpleaños 🕯️'],
+    [0.25, 'Luciérnaga motivada ✨'],
+    [0.45, 'Lámpara de escritorio 💡'],
+    [0.65, 'Linterna de policía 🔦'],
+    [0.82, 'Faro de Alejandría 🗼'],
+    [0.95, 'EL SOL. PARA YA. ☀️'],
+  ];
+
+  function moodFor(l) {
+    let m = moods[0][1];
+    for (const [t, txt] of moods) if (l >= t) m = txt;
+    return m;
+  }
+
+  // --- Lectura del acelerómetro ---
+  function onMotion(e) {
+    let jolt;
+    const a = e.acceleration;
+    if (a && a.x != null) {
+      // Aceleración sin gravedad (la mayoría de iOS y Android)
+      jolt = Math.hypot(a.x, a.y, a.z);
+    } else {
+      // Respaldo: con gravedad, medimos el cambio entre muestras
+      const g = e.accelerationIncludingGravity;
+      if (!g || g.x == null) return;
+      if (lastSample) {
+        jolt = Math.hypot(g.x - lastSample.x, g.y - lastSample.y, g.z - lastSample.z);
+      }
+      lastSample = { x: g.x, y: g.y, z: g.z };
+      if (jolt == null) return;
+    }
+    if (!gotMotion) { gotMotion = true; $('fake').classList.add('hidden'); }
+    feed(jolt);
+  }
+
+  function feed(jolt) {
+    jolt = Math.min(jolt, MAX_JOLT);
+    if (jolt < DEADZONE) return;
+    level = Math.min(1, level + (jolt - DEADZONE) * GAIN);
+  }
+
+  // --- Bucle de render ---
+  let lastBuzz = 0;
+  function tick(t) {
+    const dt = Math.min(0.1, (t - lastT) / 1000);
+    lastT = t;
+    level = Math.max(0, level - DECAY_PER_SEC * dt * (0.4 + level)); // cae más rápido cuando está alto
+
+    const shown = Math.round(level * 100);
+    root.style.setProperty('--lvl', level.toFixed(3));
+    $('pct').textContent = shown + '%';
+    $('bar').style.width = shown + '%';
+    $('mood').textContent = moodFor(level);
+
+    if (level > peak) peak = level;
+    $('hint').textContent = level > 0.95 ? '¡Récord de inutilidad alcanzado!'
+      : level > 0.02 ? 'Sigue, sigue…' : (peak > 0.3 ? `Tu récord: ${Math.round(peak * 100)}%` : '¡Agítalo!');
+
+    // Un vibrón de celebración al llegar al tope (solo Android; iOS lo ignora sin romperse)
+    if (level > 0.97 && t - lastBuzz > 1500 && navigator.vibrate) {
+      navigator.vibrate([40, 30, 40]);
+      lastBuzz = t;
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // --- Mantener la pantalla encendida ---
+  async function keepAwake() {
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLock = await navigator.wakeLock.request('screen');
+      }
+    } catch (_) { /* no pasa nada */ }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && wakeLock !== null) keepAwake();
+  });
+
+  function showError(msg) {
+    const el = $('err');
+    el.textContent = msg;
+    el.classList.remove('hidden');
+  }
+
+  // --- Arranque (debe ser por toque del usuario para iOS) ---
+  $('start').addEventListener('click', async () => {
+    if (!window.isSecureContext) {
+      showError('Los sensores solo funcionan con HTTPS (o localhost). Abre esta página desde una dirección https://');
+    }
+
+    let allowed = true;
+    // iOS 13+ exige pedir permiso explícito
+    if (typeof DeviceMotionEvent !== 'undefined' &&
+        typeof DeviceMotionEvent.requestPermission === 'function') {
+      try {
+        allowed = (await DeviceMotionEvent.requestPermission()) === 'granted';
+      } catch (err) {
+        allowed = false;
+      }
+      if (!allowed) {
+        showError('Sin permiso de movimiento no hay magia. En iPhone: recarga la página y toca "Permitir". Si no aparece, revisa Ajustes › Safari › Movimiento y orientación.');
+      }
+    }
+
+    if (allowed && 'DeviceMotionEvent' in window) {
+      window.addEventListener('devicemotion', onMotion, { passive: true });
+    }
+
+    keepAwake();
+    $('start-screen').classList.add('hidden');
+    $('app').classList.remove('hidden');
+
+    // Si en 1.5 s no llegó ningún dato (PC, permisos, etc.), ofrecemos el botón de mentira
+    setTimeout(() => { if (!gotMotion) $('fake').classList.remove('hidden'); }, 1500);
+    requestAnimationFrame(t => { lastT = t; tick(t); });
+  });
+
+  $('calm').addEventListener('click', () => { level = 0; });
+
+  // Respaldo para PC o sensores ausentes: mantener pulsado = "agitar"
+  let fakeTimer = null;
+  const fakeStart = e => { e.preventDefault(); fakeTimer = setInterval(() => feed(8 + Math.random() * 20), 50); };
+  const fakeStop = () => { clearInterval(fakeTimer); fakeTimer = null; };
+  $('fake').addEventListener('pointerdown', fakeStart);
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => $('fake').addEventListener(ev, fakeStop));
+})();
+</script>
+</body>
+</html>
