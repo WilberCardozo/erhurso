@@ -33,22 +33,29 @@
   }
 
   main {
-    position: relative; z-index: 1;
+    position: relative;  /* sin z-index: así los hijos pueden mezclarse con #lamp */
     height: 100%;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 20px;
+    gap: 24px;
     padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
     text-align: center;
-    mix-blend-mode: difference;  /* el texto siempre se ve, sea oscuro o claro */
   }
+  /* la barra y los botones siempre se ven, sea oscuro o claro */
+  main .meter, main .row { mix-blend-mode: difference; }
 
   h1 { margin: 0; font-size: clamp(22px, 7vw, 34px); letter-spacing: -0.02em; }
   .sub { margin: 0; opacity: .75; font-size: 15px; max-width: 32ch; line-height: 1.4; }
 
-  #pct {
-    font-size: clamp(72px, 30vw, 160px);
-    font-weight: 800; line-height: 1;
-    font-variant-numeric: tabular-nums;
+  /* El gato: aparece y se ilumina según la agitación */
+  #cat {
+    display: block;
+    width: min(78vw, 360px, 52vh * 0.75);
+    aspect-ratio: 3 / 4;
+    object-fit: cover;
+    border-radius: 28px;
+    opacity: 0;
+    will-change: opacity, transform, filter;
+    pointer-events: none;
   }
 
   .meter {
@@ -96,8 +103,8 @@
   <p class="tiny">Tip: sube el brillo del sistema al máximo para mejor efecto. Por seguridad, ningún navegador deja que una web cambie el brillo real, así que aquí lo simulamos con la pantalla.</p>
 </section>
 
-<main id="app" class="hidden" aria-live="polite">
-  <div id="pct">0%</div>
+<main id="app" class="hidden">
+  <img id="cat" src="gato.jpg" alt="Gato blanco deslumbrado por un flash">
   <div class="meter"><i id="bar"></i></div>
   <div class="row">
     <button class="ghost" id="calm">Calmarse</button>
@@ -121,12 +128,22 @@
   let wakeLock = null;
 
   // --- Animaciones con GSAP: la pantalla persigue a `level` con suavizado ---
+  const cat = $('cat');
   const shown = { v: 0 };
   const lampTo = gsap.quickTo('#lamp', 'opacity', { duration: 0.35, ease: 'power2.out' });
   const barTo = gsap.quickTo('#bar', 'scaleX', { duration: 0.35, ease: 'power2.out' });
-  const numTo = gsap.quickTo(shown, 'v', {
+  // El gato: invisible en reposo; al agitar aparece, crece un poco y se "quema" de luz
+  const catTo = gsap.quickTo(shown, 'v', {
     duration: 0.35, ease: 'power2.out',
-    onUpdate: () => { $('pct').textContent = Math.round(shown.v * 100) + '%'; },
+    onUpdate: () => {
+      const v = shown.v;
+      gsap.set(cat, {
+        opacity: Math.min(1, v * 1.6),
+        scale: 0.85 + v * 0.2,
+        filter: `brightness(${(0.4 + v * 1.1).toFixed(2)}) contrast(${(1 + v * 0.3).toFixed(2)})`,
+        boxShadow: `0 0 ${Math.round(v * 90)}px ${Math.round(v * 20)}px rgba(200, 225, 255, ${(v * 0.8).toFixed(2)})`,
+      });
+    },
   });
 
   // --- Lectura del acelerómetro ---
@@ -164,12 +181,13 @@
 
     lampTo(level);
     barTo(level);
-    numTo(level);
+    catTo(level);
 
-    // Al llegar al tope: pulso del número y vibración (solo Android; iOS la ignora)
+    // Al llegar al tope: el gato tiembla y el celular vibra (solo Android; iOS la ignora)
     if (level > 0.97 && !atMax) {
       atMax = true;
-      gsap.fromTo('#pct', { scale: 1 }, { scale: 1.15, duration: 0.15, yoyo: true, repeat: 1, ease: 'power1.out' });
+      gsap.fromTo(cat, { rotation: -4 }, { rotation: 4, duration: 0.06, yoyo: true, repeat: 5, ease: 'none',
+        onComplete: () => gsap.set(cat, { rotation: 0 }) });
       if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
     } else if (level < 0.85) {
       atMax = false;
@@ -229,7 +247,7 @@
     gsap.timeline()
       .to('#start-screen', { opacity: 0, duration: 0.4, ease: 'power2.in',
         onComplete: () => $('start-screen').classList.add('hidden') })
-      .from('#app > *', { opacity: 0, y: 24, duration: 0.5, stagger: 0.08, ease: 'back.out(1.6)' }, '-=0.1');
+      .from('#app > :not(#cat)', { opacity: 0, y: 24, duration: 0.5, stagger: 0.08, ease: 'back.out(1.6)' }, '-=0.1');
 
     // Si en 1.5 s no llegó ningún dato (PC, permisos, etc.), ofrecemos el botón de mentira
     gsap.delayedCall(1.5, () => {
