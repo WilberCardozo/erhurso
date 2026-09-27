@@ -8,9 +8,9 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Agitómetro Lumínico</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
 <style>
   :root {
-    --lvl: 0;            /* 0..1, lo controla JS */
     --ink: #f5f5f5;
     --accent: #ffd54a;
   }
@@ -29,8 +29,7 @@
   #lamp {
     position: fixed; inset: 0;
     background: radial-gradient(circle at 50% 45%, #fffbe8 0%, #fff3c4 40%, #ffe07a 100%);
-    opacity: var(--lvl);
-    transition: opacity 80ms linear;
+    opacity: 0;
   }
 
   main {
@@ -51,13 +50,16 @@
     font-weight: 800; line-height: 1;
     font-variant-numeric: tabular-nums;
   }
-  #mood { font-size: 18px; font-weight: 600; min-height: 1.4em; }
 
   .meter {
     width: min(320px, 80vw); height: 10px; border-radius: 99px;
     border: 2px solid currentColor; overflow: hidden;
   }
-  .meter > i { display: block; height: 100%; width: 0; background: currentColor; }
+  .meter > i {
+    display: block; height: 100%; width: 100%;
+    background: currentColor;
+    transform: scaleX(0); transform-origin: left center;
+  }
 
   button {
     font: inherit; font-size: 18px; font-weight: 700;
@@ -65,9 +67,7 @@
     border: 0; border-radius: 999px;
     padding: 16px 28px; min-height: 52px;
     cursor: pointer;
-    mix-blend-mode: normal;
   }
-  button:active { transform: scale(.97); }
   .ghost {
     background: transparent; color: currentColor;
     border: 2px solid currentColor; font-size: 15px; padding: 10px 18px; min-height: 44px;
@@ -90,7 +90,7 @@
 <section id="start-screen">
   <div class="emoji" aria-hidden="true">📳💡</div>
   <h1>Agitómetro Lumínico</h1>
-  <p class="sub">El sistema más inútil del mundo: agita tu celular y la pantalla brillará más. Déjalo quieto y se apaga poco a poco.</p>
+  <p class="sub">El sistema más inútil del mundo: agita tu celular con fuerza y la pantalla brillará más. Déjalo quieto y se apaga.</p>
   <button id="start">Empezar a agitar</button>
   <p id="err" class="hidden"></p>
   <p class="tiny">Tip: sube el brillo del sistema al máximo para mejor efecto. Por seguridad, ningún navegador deja que una web cambie el brillo real, así que aquí lo simulamos con la pantalla.</p>
@@ -99,8 +99,6 @@
 <main id="app" class="hidden" aria-live="polite">
   <div id="pct">0%</div>
   <div class="meter"><i id="bar"></i></div>
-  <div id="mood">Modo siesta 😴</div>
-  <p class="sub" id="hint">¡Agítalo!</p>
   <div class="row">
     <button class="ghost" id="calm">Calmarse</button>
     <button class="ghost hidden" id="fake">Agitar de mentira</button>
@@ -110,36 +108,26 @@
 <script>
 (() => {
   const $ = id => document.getElementById(id);
-  const root = document.documentElement;
 
-  // --- Parámetros de la tontería ---
-  const DECAY_PER_SEC = 0.18;   // cuánto brillo se pierde por segundo en reposo
-  const GAIN = 0.012;           // cuánto brillo aporta cada m/s² de agitación
-  const DEADZONE = 1.2;         // ignora temblores de mano (m/s²)
-  const MAX_JOLT = 40;          // tope por muestra
+  // --- Sensibilidad (valores altos = más difícil) ---
+  const DEADZONE = 9;            // m/s² que hay que superar para que cuente (un meneo suave no basta)
+  const GAIN = 0.0006;           // brillo por cada m/s² sobre la zona muerta, por muestra (~60/s)
+  const DECAY_PER_SEC = 0.4;     // cuánto se apaga por segundo en reposo
+  const MAX_JOLT = 50;           // tope por muestra
 
-  let level = 0;       // brillo actual 0..1
-  let peak = 0;        // para el mensaje "récord"
-  let lastT = performance.now();
+  let level = 0;       // brillo real 0..1 (lo que dicta la física)
   let lastSample = null;
   let gotMotion = false;
   let wakeLock = null;
 
-  const moods = [
-    [0.00, 'Modo siesta 😴'],
-    [0.10, 'Velita de cumpleaños 🕯️'],
-    [0.25, 'Luciérnaga motivada ✨'],
-    [0.45, 'Lámpara de escritorio 💡'],
-    [0.65, 'Linterna de policía 🔦'],
-    [0.82, 'Faro de Alejandría 🗼'],
-    [0.95, 'EL SOL. PARA YA. ☀️'],
-  ];
-
-  function moodFor(l) {
-    let m = moods[0][1];
-    for (const [t, txt] of moods) if (l >= t) m = txt;
-    return m;
-  }
+  // --- Animaciones con GSAP: la pantalla persigue a `level` con suavizado ---
+  const shown = { v: 0 };
+  const lampTo = gsap.quickTo('#lamp', 'opacity', { duration: 0.35, ease: 'power2.out' });
+  const barTo = gsap.quickTo('#bar', 'scaleX', { duration: 0.35, ease: 'power2.out' });
+  const numTo = gsap.quickTo(shown, 'v', {
+    duration: 0.35, ease: 'power2.out',
+    onUpdate: () => { $('pct').textContent = Math.round(shown.v * 100) + '%'; },
+  });
 
   // --- Lectura del acelerómetro ---
   function onMotion(e) {
@@ -168,29 +156,24 @@
     level = Math.min(1, level + (jolt - DEADZONE) * GAIN);
   }
 
-  // --- Bucle de render ---
-  let lastBuzz = 0;
-  function tick(t) {
-    const dt = Math.min(0.1, (t - lastT) / 1000);
-    lastT = t;
+  // --- Bucle de física en el ticker de GSAP ---
+  let atMax = false;
+  function tick(time, deltaTime) {
+    const dt = Math.min(0.1, deltaTime / 1000);
     level = Math.max(0, level - DECAY_PER_SEC * dt * (0.4 + level)); // cae más rápido cuando está alto
 
-    const shown = Math.round(level * 100);
-    root.style.setProperty('--lvl', level.toFixed(3));
-    $('pct').textContent = shown + '%';
-    $('bar').style.width = shown + '%';
-    $('mood').textContent = moodFor(level);
+    lampTo(level);
+    barTo(level);
+    numTo(level);
 
-    if (level > peak) peak = level;
-    $('hint').textContent = level > 0.95 ? '¡Récord de inutilidad alcanzado!'
-      : level > 0.02 ? 'Sigue, sigue…' : (peak > 0.3 ? `Tu récord: ${Math.round(peak * 100)}%` : '¡Agítalo!');
-
-    // Un vibrón de celebración al llegar al tope (solo Android; iOS lo ignora sin romperse)
-    if (level > 0.97 && t - lastBuzz > 1500 && navigator.vibrate) {
-      navigator.vibrate([40, 30, 40]);
-      lastBuzz = t;
+    // Al llegar al tope: pulso del número y vibración (solo Android; iOS la ignora)
+    if (level > 0.97 && !atMax) {
+      atMax = true;
+      gsap.fromTo('#pct', { scale: 1 }, { scale: 1.15, duration: 0.15, yoyo: true, repeat: 1, ease: 'power1.out' });
+      if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
+    } else if (level < 0.85) {
+      atMax = false;
     }
-    requestAnimationFrame(tick);
   }
 
   // --- Mantener la pantalla encendida ---
@@ -209,7 +192,11 @@
     const el = $('err');
     el.textContent = msg;
     el.classList.remove('hidden');
+    gsap.from(el, { opacity: 0, y: 8, duration: 0.3 });
   }
+
+  // Entrada de la pantalla inicial
+  gsap.from('#start-screen > *', { opacity: 0, y: 20, duration: 0.6, stagger: 0.08, ease: 'power3.out' });
 
   // --- Arranque (debe ser por toque del usuario para iOS) ---
   $('start').addEventListener('click', async () => {
@@ -236,19 +223,36 @@
     }
 
     keepAwake();
-    $('start-screen').classList.add('hidden');
+
+    // Transición: se va la portada, entra el medidor
     $('app').classList.remove('hidden');
+    gsap.timeline()
+      .to('#start-screen', { opacity: 0, duration: 0.4, ease: 'power2.in',
+        onComplete: () => $('start-screen').classList.add('hidden') })
+      .from('#app > *', { opacity: 0, y: 24, duration: 0.5, stagger: 0.08, ease: 'back.out(1.6)' }, '-=0.1');
 
     // Si en 1.5 s no llegó ningún dato (PC, permisos, etc.), ofrecemos el botón de mentira
-    setTimeout(() => { if (!gotMotion) $('fake').classList.remove('hidden'); }, 1500);
-    requestAnimationFrame(t => { lastT = t; tick(t); });
+    gsap.delayedCall(1.5, () => {
+      if (gotMotion) return;
+      $('fake').classList.remove('hidden');
+      gsap.from('#fake', { opacity: 0, scale: 0.8, duration: 0.3, ease: 'back.out(2)' });
+    });
+
+    gsap.ticker.add(tick);
+  });
+
+  // Botones: pequeño "apretón" al tocar
+  document.querySelectorAll('button').forEach(b => {
+    b.addEventListener('pointerdown', () => gsap.to(b, { scale: 0.95, duration: 0.1 }));
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev =>
+      b.addEventListener(ev, () => gsap.to(b, { scale: 1, duration: 0.25, ease: 'back.out(3)' })));
   });
 
   $('calm').addEventListener('click', () => { level = 0; });
 
   // Respaldo para PC o sensores ausentes: mantener pulsado = "agitar"
   let fakeTimer = null;
-  const fakeStart = e => { e.preventDefault(); fakeTimer = setInterval(() => feed(8 + Math.random() * 20), 50); };
+  const fakeStart = e => { e.preventDefault(); fakeTimer = setInterval(() => feed(15 + Math.random() * 30), 16); };
   const fakeStop = () => { clearInterval(fakeTimer); fakeTimer = null; };
   $('fake').addEventListener('pointerdown', fakeStart);
   ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => $('fake').addEventListener(ev, fakeStop));
